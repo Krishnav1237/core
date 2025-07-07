@@ -1,5 +1,5 @@
 #pragma once
-#include <qpi.h>
+#include "qpi.h"
 using namespace QPI;  // Qubic Programming Interface
 
 struct HM25 : public ContractBase {
@@ -39,9 +39,9 @@ struct HM25 : public ContractBase {
 
     // DEX State
     uint64 latestPrice;
-    collection<id, uint64> balances;                     // user → collateral
+    Collection<id, uint64> balances;                     // user → collateral
     struct PosRec { uint64 entryPrice; uint64 size; uint64 leverage; bit isLong; bit isOpen; };
-    collection<id, PosRec> positions;                    // user → open position
+    Collection<id, PosRec> positions;                    // user → open position
 
     // ─── Procedures (mutate state) ─────────────────────────────────────────
     PUBLIC_PROCEDURE(Echo) {
