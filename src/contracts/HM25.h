@@ -3,7 +3,8 @@
 #include <stdexcept>
 #include <cstdint>
 
-using namespace QPI;
+// Remove the problematic using directive
+// using namespace QPI;
 
 // --- CustomHash for unordered_map ---
 struct CustomHash {
@@ -187,7 +188,7 @@ private:
 };
 
 // --- Qubic Contract HM25 (merged) ---
-struct HM25 : public ContractBase {
+struct HM25 : public QPI::ContractBase {  // Use explicit QPI:: namespace
     // Qubic input/output structs
     struct Echo_input{};
     struct Echo_output{};
@@ -195,13 +196,13 @@ struct HM25 : public ContractBase {
     struct Burn_output{};
     struct GetStats_input {};
     struct GetStats_output {
-        uint64 numberOfEchoCalls;
-        uint64 numberOfBurnCalls;
+        QPI::uint64 numberOfEchoCalls;  // Use QPI:: prefix
+        QPI::uint64 numberOfBurnCalls;  // Use QPI:: prefix
     };
 
     // On-chain state
-    uint64 numberOfEchoCalls;
-    uint64 numberOfBurnCalls;
+    QPI::uint64 numberOfEchoCalls;  // Use QPI:: prefix
+    QPI::uint64 numberOfBurnCalls;  // Use QPI:: prefix
 
     // Shared DEX modules - declared as pointers to avoid constructor issues
     CollateralVault* vault;
