@@ -1,6 +1,8 @@
 using namespace QPI;
 
-// Removed unused struct HM252
+struct HM252
+{
+};
 
 struct HM25 : public ContractBase {
     // ─── Input/Output Structs ───────────────────────────────────────────────
@@ -45,13 +47,13 @@ struct HM25 : public ContractBase {
 
     // ─── Procedures (mutate state) ─────────────────────────────────────────
     PUBLIC_PROCEDURE(Echo) {
-        numberOfEchoCalls++;
+        state.numberOfEchoCalls++;
         uint64 reward = invocationReward();
         if (reward > 0) transfer(invocator(), reward);
     } _
 
     PUBLIC_PROCEDURE(Burn) {
-        numberOfBurnCalls++;
+        state.numberOfBurnCalls++;
         uint64 reward = invocationReward();
         if (reward > 0) burn(reward);
     } _
@@ -71,7 +73,7 @@ struct HM25 : public ContractBase {
 
     PUBLIC_PROCEDURE(UpdatePrice) {
         if (input.price == 0) abort();
-        latestPrice = input.price;
+        state.latestPrice = input.price;
     } _
 
     PUBLIC_PROCEDURE(OpenPos) {
@@ -81,7 +83,7 @@ struct HM25 : public ContractBase {
         uint64 bal = balances.get(user);
         if (bal < input.margin) abort();
         balances.set(user, bal - input.margin);
-        PosRec np = { latestPrice, mul(input.margin, input.leverage), input.leverage, input.isLong, 1 };
+        PosRec np = { state.latestPrice, mul(input.margin, input.leverage), input.leverage, input.isLong, 1 };
         positions.set(user, np);
     } _
 
@@ -89,7 +91,7 @@ struct HM25 : public ContractBase {
         id user = invocator();
         PosRec pr = positions.get(user);
         if (!pr.isOpen) abort();
-        uint64 price = latestPrice;
+        uint64 price = state.latestPrice;
         uint64 diff = pr.isLong ? price - pr.entryPrice : pr.entryPrice - price;
         uint64 notionalDiv = div(pr.size, pr.entryPrice);
         uint64 pnl = mul(diff, notionalDiv);
@@ -103,8 +105,8 @@ struct HM25 : public ContractBase {
 
     // ─── Functions (read-only) ─────────────────────────────────────────────
     PUBLIC_FUNCTION(GetStats) {
-        output.numberOfBurnCalls = numberOfBurnCalls;
-        output.numberOfEchoCalls = numberOfEchoCalls;
+        output.numberOfBurnCalls = state.numberOfBurnCalls;
+        output.numberOfEchoCalls = state.numberOfEchoCalls;
     } _
 
     PUBLIC_FUNCTION(GetBalance) {
@@ -124,9 +126,9 @@ struct HM25 : public ContractBase {
         REGISTER_USER_FUNCTION (GetStats,    1);
         REGISTER_USER_FUNCTION (GetBalance,  2);
     } _
-    INITIALIZE {
-        numberOfEchoCalls = 0;
-        numberOfBurnCalls = 0;
-        latestPrice = 0;
+INITIALIZE {
+        state.numberOfEchoCalls = 0;
+        state.numberOfBurnCalls = 0;
+        state.latestPrice       = 0;
     } _
 };
