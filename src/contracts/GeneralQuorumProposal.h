@@ -1,191 +1,320 @@
-#include "qpi.h"
-
 using namespace QPI;
 
-struct HM25 : ContractBase {
-    struct State {
-        uint64 numberOfEchoCalls;
-        uint64 numberOfBurnCalls;
-        uint64 latestPrice;
+struct GQMPROP2
+{
+};
 
-        HashMap<id, uint64, 10000> balances;
+struct GQMPROP : public ContractBase
+{
+	//----------------------------------------------------------------------------
+	// Define common types
 
-        struct PosRec {
-            uint64 entryPrice;
-            uint64 size;
-            uint64 leverage;
-            bit isLong;
-            bit isOpen;
-        };
-        HashMap<id, PosRec, 10000> positions;
-    };
+	// Proposal data type. We don't support scalar votes, but multi-option voting.
+	typedef ProposalDataV1<false> ProposalDataT;
 
-    struct Echo_input {};
-    struct Echo_output {};
+	// Computors have right to propose and vote. There is one proposal slot per computor to make sure
+	// that a proposal can never be blocked by no free slots.
+	typedef ProposalAndVotingByComputors<NUMBER_OF_COMPUTORS> ProposersAndVotersT;
 
-    struct Burn_input {};
-    struct Burn_output {};
+	// Proposal and voting storage type
+	typedef ProposalVoting<ProposersAndVotersT, ProposalDataT> ProposalVotingT;
 
-    struct Deposit_input { uint64 amount; };
-    struct Deposit_output {};
+	struct Success_output
+	{
+		bool okay;
+	};
 
-    struct Withdraw_input { uint64 amount; };
-    struct Withdraw_output {};
+	struct RevenueDonationEntry
+	{
+		id destinationPublicKey;
+		sint64 millionthAmount;
+		uint16 firstEpoch;
+	};
 
-    struct UpdatePrice_input { uint64 price; };
-    struct UpdatePrice_output {};
+	typedef Array<RevenueDonationEntry, 128> RevenueDonationT;
 
-    struct OpenPos_input { bit isLong; uint64 margin; uint64 leverage; };
-    struct OpenPos_output {};
+private:
+	//----------------------------------------------------------------------------
+	// Define state
+	ProposalVotingT proposals;
+	RevenueDonationT revenueDonation;
 
-    struct ClosePos_input {};
-    struct ClosePos_output { uint64 pnl; uint64 returnAmount; };
+	//----------------------------------------------------------------------------
+	// Define private procedures and functions with input and output
 
-    struct GetStats_input {};
-    struct GetStats_output {
-        uint64 numberOfEchoCalls;
-        uint64 numberOfBurnCalls;
-    };
+	typedef RevenueDonationEntry _SetRevenueDonationEntry_input;
+	typedef Success_output _SetRevenueDonationEntry_output;
+	struct _SetRevenueDonationEntry_locals
+	{
+		uint64 idx;
+	};
 
-    struct GetBalance_input {};
-    struct GetBalance_output { uint64 balance; };
+	PRIVATE_PROCEDURE_WITH_LOCALS(_SetRevenueDonationEntry)
+		// Try to find public key for updating entry
+		for (locals.idx = 0; locals.idx < state.revenueDonation.capacity(); ++locals.idx)
+		{
+			if (input.destinationPublicKey == state.revenueDonation.get(locals.idx).destinationPublicKey)
+			{
+				// update entry
+				state.revenueDonation.set(locals.idx, input);
+				output.okay = true;
+				return;
+			}
+		}
 
-    struct GetPosition_input {};
-    struct GetPosition_output {
-        uint64 entryPrice;
-        uint64 size;
-        uint64 leverage;
-        bit isLong;
-        bit isOpen;
-    };
+		// Public key not in table -> add entry to empty slot (with zero public key)
+		for (locals.idx = 0; locals.idx < state.revenueDonation.capacity(); ++locals.idx)
+		{
+			if (isZero(state.revenueDonation.get(locals.idx).destinationPublicKey))
+			{
+				// add entry
+				state.revenueDonation.set(locals.idx, input);
+				output.okay = true;
+				return;
+			}
+		}
+	_
 
-    PUBLIC_PROCEDURE(Echo) {
-        state.numberOfEchoCalls++;
-        uint64 reward = qpi.invocationReward();
-        if (reward > 0) {
-            qpi.transfer(qpi.invocator(), reward);
-        }
-    } _
+public:
+	//----------------------------------------------------------------------------
+	// Define public procedures and functions with input and output
 
-    PUBLIC_PROCEDURE(Burn) {
-        state.numberOfBurnCalls++;
-        uint64 reward = qpi.invocationReward();
-        if (reward > 0) {
-            qpi.burn(reward);
-        }
-    } _
+	typedef ProposalDataT SetProposal_input;
+	typedef Success_output SetProposal_output;
+	struct SetProposal_locals
+	{
+		uint32 i;
+		sint64 millionthAmount;
+	};
 
-    PUBLIC_PROCEDURE(Deposit) {
-        id user = qpi.invocator();
-        uint64 reward = qpi.invocationReward();
-        if (reward == 0) return;
+	PUBLIC_PROCEDURE_WITH_LOCALS(SetProposal)
+		// TODO: Fee? Burn fee?
 
-        uint64 current = state.balances.contains(user) ? state.balances.get(user) : 0;
-        state.balances.set(user, current + reward);
-    } _
+		// Check requirements for proposals in this contract
+		switch (ProposalTypes::cls(input.type))
+		{
+		case ProposalTypes::Class::Transfer:
+			// Check that amounts, which are in millionth, are in range of 0 (= 0%) to 1000000 (= 100%)
+			for (locals.i = 0; locals.i < 4; ++locals.i)
+			{
+				locals.millionthAmount = input.transfer.amounts.get(locals.i);
+				if (locals.millionthAmount < 0 || locals.millionthAmount > 1000000)
+				{
+					output.okay = false;
+					return;
+				}
+			}
+			break;
 
-    PUBLIC_PROCEDURE(Withdraw) {
-        id user = qpi.invocator();
-        if (!state.balances.contains(user)) return;
+		case ProposalTypes::Class::Variable:
+			// Proposals for setting a variable are not allowed at the moment (lack of meaning)
+			output.okay = false;
+			return;
+		}
 
-        uint64 current = state.balances.get(user);
-        if (current < input.amount) return;
+		// Try to set proposal (checks originators rights and general validity of input proposal)
+		output.okay = qpi(state.proposals).setProposal(qpi.originator(), input);
+	_
 
-        state.balances.set(user, current - input.amount);
-        qpi.transfer(user, input.amount);
-    } _
 
-    PUBLIC_PROCEDURE(UpdatePrice) {
-        if (input.price == 0) return;
-        state.latestPrice = input.price;
-    } _
+	struct GetProposalIndices_input
+	{
+		bit activeProposals;		// Set true to return indices of active proposals, false for proposals of prior epochs
+		sint32 prevProposalIndex;   // Set -1 to start getting indices. If returned index array is full, call again with highest index returned.
+	};
+	struct GetProposalIndices_output
+	{
+		uint16 numOfIndices;		// Number of valid entries in indices. Call again if it is 64.
+		Array<uint16, 64> indices;	// Requested proposal indices. Valid entries are in range 0 ... (numOfIndices - 1).
+	};
 
-    PUBLIC_PROCEDURE(OpenPos) {
-        id user = qpi.invocator();
-        if (state.positions.contains(user) && state.positions.get(user).isOpen) return;
+	PUBLIC_FUNCTION(GetProposalIndices)
+		if (input.activeProposals)
+		{
+			// Return proposals that are open for voting in current epoch
+			// (output is initalized with zeros by contract system)
+			while ((input.prevProposalIndex = qpi(state.proposals).nextProposalIndex(input.prevProposalIndex, qpi.epoch())) >= 0)
+			{
+				output.indices.set(output.numOfIndices, input.prevProposalIndex);
+				++output.numOfIndices;
 
-        uint64 balance = state.balances.contains(user) ? state.balances.get(user) : 0;
-        if (balance < input.margin || input.leverage == 0 || state.latestPrice == 0) return;
+				if (output.numOfIndices == output.indices.capacity())
+					break;
+			}
+		}
+		else
+		{
+			// Return proposals of previous epochs not overwritten yet
+			// (output is initalized with zeros by contract system)
+			while ((input.prevProposalIndex = qpi(state.proposals).nextFinishedProposalIndex(input.prevProposalIndex)) >= 0)
+			{
+				output.indices.set(output.numOfIndices, input.prevProposalIndex);
+				++output.numOfIndices;
 
-        if (input.margin > UINT64_MAX / input.leverage) return;
+				if (output.numOfIndices == output.indices.capacity())
+					break;
+			}
+		}
+	_
 
-        state.balances.set(user, balance - input.margin);
-        State::PosRec pos{state.latestPrice, input.margin * input.leverage, input.leverage, input.isLong, 1};
-        state.positions.set(user, pos);
-    } _
 
-    PUBLIC_PROCEDURE(ClosePos) {
-        id user = qpi.invocator();
-        if (!state.positions.contains(user)) return;
+	struct GetProposal_input
+	{
+		uint16 proposalIndex;
+	};
+	struct GetProposal_output
+	{
+		bit okay;
+		uint8 _padding0[7];
+		id proposerPubicKey;
+		ProposalDataT proposal;
+	};
 
-        State::PosRec pos = state.positions.get(user);
-        if (!pos.isOpen || state.latestPrice == 0) return;
+	PUBLIC_FUNCTION(GetProposal)
+		output.proposerPubicKey = qpi(state.proposals).proposerId(input.proposalIndex);
+		output.okay = qpi(state.proposals).getProposal(input.proposalIndex, output.proposal);
+	_
 
-        sint64 pnl = 0;
-        uint64 priceDiff = (pos.isLong ? (state.latestPrice >= pos.entryPrice ? state.latestPrice - pos.entryPrice : pos.entryPrice - state.latestPrice)
-                                       : (pos.entryPrice >= state.latestPrice ? pos.entryPrice - state.latestPrice : state.latestPrice - pos.entryPrice));
 
-        sint64 signedCalc = (sint64)(priceDiff * pos.size / pos.entryPrice);
-        pnl = pos.isLong ? (state.latestPrice >= pos.entryPrice ? signedCalc : -signedCalc)
-                         : (pos.entryPrice >= state.latestPrice ? signedCalc : -signedCalc);
+	typedef ProposalSingleVoteDataV1 Vote_input;
+	typedef Success_output Vote_output;
 
-        uint64 margin = pos.size / pos.leverage;
-        uint64 retAmt = margin;
-        if (pnl > 0) retAmt += (uint64)pnl;
-        else if ((uint64)(-pnl) < margin) retAmt -= (uint64)(-pnl);
-        else retAmt = 0;
+	PUBLIC_PROCEDURE(Vote)
+		// TODO: Fee? Burn fee?
+		output.okay = qpi(state.proposals).vote(qpi.originator(), input);
+	_
 
-        uint64 current = state.balances.contains(user) ? state.balances.get(user) : 0;
-        state.balances.set(user, current + retAmt);
 
-        pos.isOpen = 0;
-        state.positions.set(user, pos);
+	struct GetVote_input
+	{
+		id voter;
+		uint16 proposalIndex;
+	};
+	struct GetVote_output
+	{
+		bit okay;
+		ProposalSingleVoteDataV1 vote;
+	};
 
-        output.pnl = (pnl > 0 ? (uint64)pnl : 0);
-        output.returnAmount = retAmt;
-    } _
+	PUBLIC_FUNCTION(GetVote)
+		output.okay = qpi(state.proposals).getVote(
+			input.proposalIndex,
+			qpi(state.proposals).voterIndex(input.voter),
+			output.vote);
+	_
 
-    PUBLIC_FUNCTION(GetStats) {
-        output.numberOfEchoCalls = state.numberOfEchoCalls;
-        output.numberOfBurnCalls = state.numberOfBurnCalls;
-    } _
 
-    PUBLIC_FUNCTION(GetBalance) {
-        id user = qpi.invocator();
-        output.balance = (state.balances.contains(user) ? state.balances.get(user) : 0);
-    } _
+	struct GetVotingResults_input
+	{
+		uint16 proposalIndex;
+	};
+	struct GetVotingResults_output
+	{
+		bit okay;
+		ProposalSummarizedVotingDataV1 results;
+	};
 
-    PUBLIC_FUNCTION(GetPosition) {
-        id user = qpi.invocator();
-        if (state.positions.contains(user)) {
-            State::PosRec p = state.positions.get(user);
-            output.entryPrice = p.entryPrice;
-            output.size = p.size;
-            output.leverage = p.leverage;
-            output.isLong = p.isLong;
-            output.isOpen = p.isOpen;
-        } else {
-            output = {0,0,0,0,0};
-        }
-    } _
+	PUBLIC_FUNCTION(GetVotingResults)
+		output.okay = qpi(state.proposals).getVotingSummary(
+			input.proposalIndex, output.results);
+	_
 
-    REGISTER_USER_FUNCTIONS_AND_PROCEDURES {
-        REGISTER_USER_PROCEDURE(Echo,        1);
-        REGISTER_USER_PROCEDURE(Burn,        2);
-        REGISTER_USER_PROCEDURE(Deposit,     3);
-        REGISTER_USER_PROCEDURE(Withdraw,    4);
-        REGISTER_USER_PROCEDURE(UpdatePrice, 5);
-        REGISTER_USER_PROCEDURE(OpenPos,     6);
-        REGISTER_USER_PROCEDURE(ClosePos,    7);
 
-        REGISTER_USER_FUNCTION(GetStats,     1);
-        REGISTER_USER_FUNCTION(GetBalance,   2);
-        REGISTER_USER_FUNCTION(GetPosition,  3);
-    } _
+	typedef NoData GetRevenueDonation_input;
+	typedef RevenueDonationT GetRevenueDonation_output;
 
-    INITIALIZE {
-        state.numberOfEchoCalls = 0;
-        state.numberOfBurnCalls = 0;
-        state.latestPrice = 0;
-    } _
+	PUBLIC_FUNCTION(GetRevenueDonation)
+		output = state.revenueDonation;
+	_
+
+
+    REGISTER_USER_FUNCTIONS_AND_PROCEDURES
+        REGISTER_USER_FUNCTION(GetProposalIndices, 1);
+        REGISTER_USER_FUNCTION(GetProposal, 2);
+        REGISTER_USER_FUNCTION(GetVote, 3);
+        REGISTER_USER_FUNCTION(GetVotingResults, 4);
+        REGISTER_USER_FUNCTION(GetRevenueDonation, 5);
+
+        REGISTER_USER_PROCEDURE(SetProposal, 1);
+        REGISTER_USER_PROCEDURE(Vote, 2);
+    _
+
+		
+	struct BEGIN_EPOCH_locals
+	{
+		sint32 proposalIndex;
+		ProposalDataT proposal;
+		ProposalSummarizedVotingDataV1 results;
+		sint32 optionIndex;
+		uint32 optionVotes;
+		sint32 mostVotedOptionIndex;
+		uint32 mostVotedOptionVotes;
+		RevenueDonationEntry revenueDonationEntry;
+		Success_output success;
+	};
+
+	BEGIN_EPOCH_WITH_LOCALS
+		// Analyze transfer proposal results
+
+		// Iterate all proposals that were open for voting in previous epoch ...
+		locals.proposalIndex = -1;
+		while ((locals.proposalIndex = qpi(state.proposals).nextProposalIndex(locals.proposalIndex, qpi.epoch() - 1)) >= 0)
+		{
+			if (qpi(state.proposals).getProposal(locals.proposalIndex, locals.proposal))
+			{
+				// ... and have transfer proposal type
+				if (ProposalTypes::cls(locals.proposal.type) == ProposalTypes::Class::Transfer)
+				{
+					// Get voting results and check if conditions for proposal acceptance are met
+					if (qpi(state.proposals).getVotingSummary(locals.proposalIndex, locals.results))
+					{
+						// The total number of votes needs to be at least the quorum
+						if (locals.results.totalVotes >= QUORUM)
+						{
+							// Find most voted "change" option (option 0 is "no change")
+							locals.mostVotedOptionIndex = 0;
+							locals.mostVotedOptionVotes = 0;
+							for (locals.optionIndex = 1; locals.optionIndex < locals.results.optionCount; ++locals.optionIndex)
+							{
+								locals.optionVotes = locals.results.optionVoteCount.get(locals.optionIndex);
+								if (locals.mostVotedOptionVotes < locals.optionVotes)
+								{
+									locals.mostVotedOptionVotes = locals.optionVotes;
+									locals.mostVotedOptionIndex = locals.optionIndex;
+								}
+							}
+
+							// Option for changing status quo has been accepted?
+							if (locals.mostVotedOptionVotes > QUORUM / 2)
+							{
+								// Set in revenueDonation table (cannot be done in END_EPOCH, because this may overwrite entries that
+								// are still needed unchanged for this epoch for the revenue donation which is run after END_EPOCH)
+								locals.revenueDonationEntry.destinationPublicKey = locals.proposal.transfer.destination;
+								locals.revenueDonationEntry.millionthAmount = locals.proposal.transfer.amounts.get(locals.mostVotedOptionIndex - 1);
+								locals.revenueDonationEntry.firstEpoch = qpi.epoch();
+								CALL(_SetRevenueDonationEntry, locals.revenueDonationEntry, locals.success);
+							}
+						}
+					}
+				}
+			}
+		}
+	_
+
+
+	struct INITIALIZE_locals
+	{
+		RevenueDonationEntry revenueDonationEntry;
+		Success_output success;
+	};
+
+	INITIALIZE_WITH_LOCALS
+		// All works with zeroed state, but:
+		// In the construction epoch 123, directly add the 15% revenue donation to the Supply Watcher contract,
+		// which has been accepted by quorum with the old proposal system
+		locals.revenueDonationEntry.destinationPublicKey = id(7, 0, 0, 0);
+		locals.revenueDonationEntry.millionthAmount = 150 * 1000;
+		locals.revenueDonationEntry.firstEpoch = 123;
+		CALL(_SetRevenueDonationEntry, locals.revenueDonationEntry, locals.success);
+	_
 };
