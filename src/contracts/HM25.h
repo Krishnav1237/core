@@ -20,6 +20,8 @@ struct HM25 : ContractBase {
         HashMap<id, PosRec, 10000> positions;
     };
 
+    State state;
+
     struct Echo_input {};
     struct Echo_output {};
 
@@ -62,17 +64,13 @@ struct HM25 : ContractBase {
     PUBLIC_PROCEDURE(Echo) {
         state.numberOfEchoCalls++;
         uint64 reward = qpi.invocationReward();
-        if (reward > 0) {
-            qpi.transfer(qpi.invocator(), reward);
-        }
+        if (reward > 0) qpi.transfer(qpi.invocator(), reward);
     } _
 
     PUBLIC_PROCEDURE(Burn) {
         state.numberOfBurnCalls++;
         uint64 reward = qpi.invocationReward();
-        if (reward > 0) {
-            qpi.burn(reward);
-        }
+        if (reward > 0) qpi.burn(reward);
     } _
 
     PUBLIC_PROCEDURE(Deposit) {
@@ -107,8 +105,6 @@ struct HM25 : ContractBase {
         uint64 balance = state.balances.contains(user) ? state.balances.get(user) : 0;
         if (balance < input.margin || input.leverage == 0 || state.latestPrice == 0) return;
 
-        if (input.margin > UINT64_MAX / input.leverage) return;
-
         state.balances.set(user, balance - input.margin);
         State::PosRec pos{state.latestPrice, input.margin * input.leverage, input.leverage, input.isLong, 1};
         state.positions.set(user, pos);
@@ -122,12 +118,9 @@ struct HM25 : ContractBase {
         if (!pos.isOpen || state.latestPrice == 0) return;
 
         sint64 pnl = 0;
-        uint64 priceDiff = (pos.isLong ? (state.latestPrice >= pos.entryPrice ? state.latestPrice - pos.entryPrice : pos.entryPrice - state.latestPrice)
-                                       : (pos.entryPrice >= state.latestPrice ? pos.entryPrice - state.latestPrice : state.latestPrice - pos.entryPrice));
-
+        uint64 priceDiff = pos.entryPrice > state.latestPrice ? pos.entryPrice - state.latestPrice : state.latestPrice - pos.entryPrice;
         sint64 signedCalc = (sint64)(priceDiff * pos.size / pos.entryPrice);
-        pnl = pos.isLong ? (state.latestPrice >= pos.entryPrice ? signedCalc : -signedCalc)
-                         : (pos.entryPrice >= state.latestPrice ? signedCalc : -signedCalc);
+        pnl = (pos.isLong == (state.latestPrice > pos.entryPrice)) ? signedCalc : -signedCalc;
 
         uint64 margin = pos.size / pos.leverage;
         uint64 retAmt = margin;
@@ -152,7 +145,7 @@ struct HM25 : ContractBase {
 
     PUBLIC_FUNCTION(GetBalance) {
         id user = qpi.invocator();
-        output.balance = (state.balances.contains(user) ? state.balances.get(user) : 0);
+        output.balance = state.balances.contains(user) ? state.balances.get(user) : 0;
     } _
 
     PUBLIC_FUNCTION(GetPosition) {
@@ -165,7 +158,7 @@ struct HM25 : ContractBase {
             output.isLong = p.isLong;
             output.isOpen = p.isOpen;
         } else {
-            output = {0,0,0,0,0};
+            output = {0, 0, 0, 0, 0};
         }
     } _
 
