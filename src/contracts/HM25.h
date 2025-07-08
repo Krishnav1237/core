@@ -1,128 +1,167 @@
-using namespace QPI;  // Qubic Programming Interface
+// HM25.h
+// A combined DEX + Echo/Burn contract for Qubic.
+// - No #includes or other preprocessor directives
+// - Uses only Qubic‐approved macros, container types, and integer math
 
-struct HM25 : public ContractBase {
-    // ─── I/O Structs ────────────────────────────────────────────────────────
-    struct Echo_input    {};  struct Echo_output   {};
-    struct Burn_input    {};  struct Burn_output   {};
-    struct GetStats_input{}; struct GetStats_output {
-        uint64 numberOfEchoCalls;
-        uint64 numberOfBurnCalls;
-    };
+using namespace qpi;
 
-    struct Deposit_input  { uint64 amount; };
-    struct Deposit_output {};
-    struct Withdraw_input { uint64 amount; };
-    struct Withdraw_output{};
+struct HM25 : public ContractBase
+{
+    // ─── Input & Output structs ─────────────────────────────────────────────────
 
-    struct UpdatePrice_input { uint64 price; };
-    struct UpdatePrice_output{};
+    struct Echo_input    {};    struct Echo_output    {};
+    struct Burn_input    {};    struct Burn_output    {};
+    struct GetStats_input{};    struct GetStats_output{ uint64 numberOfEchoCalls; uint64 numberOfBurnCalls; };
 
-    struct GetBalance_input  {};
-    struct GetBalance_output { uint64 balance; };
+    struct Deposit_input  { uint64 amount; };  struct Deposit_output  {};
+    struct Withdraw_input { uint64 amount; };  struct Withdraw_output {};
 
-    struct OpenPos_input  { bit isLong; uint64 margin; uint64 leverage; };
-    struct OpenPos_output {};
-    struct ClosePos_input {};
-    struct ClosePos_output{};
+    struct UpdatePrice_input { uint64 price; }; struct UpdatePrice_output {};
 
-    // ─── STATE ──────────────────────────────────────────────────────────────
+    struct OpenPos_input   { bit isLong; uint64 margin; uint64 leverage; };
+    struct OpenPos_output  {};
+    struct ClosePos_input  {};
+    struct ClosePos_output {};
+
+    struct GetBalance_input{}; struct GetBalance_output{ uint64 balance; };
+
+    // ─── Persistent state ────────────────────────────────────────────────────────
+
     uint64 numberOfEchoCalls;
     uint64 numberOfBurnCalls;
+
     uint64 latestPrice;
-    collection<id, uint64> balances;
+    // user → collateral
+    HashMap<id, uint64, 1024> balances;
+    // position record
     struct PosRec { uint64 entryPrice, size, leverage; bit isLong, isOpen; };
-    collection<id, PosRec> positions;
+    HashMap<id, PosRec, 1024> positions;
 
-    // ─── PROCEDURES ─────────────────────────────────────────────────────────
-    PUBLIC_PROCEDURE(Echo) {
-        state.numberOfEchoCalls++;
-        uint64 reward = invocationReward();
-        if (reward > 0) transfer(invocator(), reward);
+    // ─── Procedures ──────────────────────────────────────────────────────────────
+
+    PUBLIC_PROCEDURE(Echo)
+    {
+        state.numberOfEchoCalls = add(state.numberOfEchoCalls, 1);
+        uint64 reward = qpi.invocationReward();
+        if (reward > 0) qpi.transfer(qpi.invocator(), reward);
     } _
 
-    PUBLIC_PROCEDURE(Burn) {
-        state.numberOfBurnCalls++;
-        uint64 reward = invocationReward();
-        if (reward > 0) burn(reward);
+    PUBLIC_PROCEDURE(Burn)
+    {
+        state.numberOfBurnCalls = add(state.numberOfBurnCalls, 1);
+        uint64 reward = qpi.invocationReward();
+        if (reward > 0) qpi.burn(reward);
     } _
 
-    PUBLIC_PROCEDURE(Deposit) {
-        id user = invocator();
-        uint64 bal = balances.get(user);
-        balances.set(user, add(bal, input.amount));
+    PUBLIC_PROCEDURE(Deposit)
+    {
+        // amount must be > 0
+        if (input.amount == 0) qpi.abort();
+        uint64 old = balances.get(qpi.invocator());
+        balances[qpi.invocator()] = add(old, input.amount);
+        balances.cleanupIfNeeded();
     } _
 
-    PUBLIC_PROCEDURE(Withdraw) {
-        id user = invocator();
-        uint64 bal = balances.get(user);
-        if (bal < input.amount) abort();
-        balances.set(user, bal - input.amount);
+    PUBLIC_PROCEDURE(Withdraw)
+    {
+        // amount must be > 0
+        if (input.amount == 0) qpi.abort();
+        uint64 bal = balances.get(qpi.invocator());
+        if (bal < input.amount) qpi.abort();
+        balances[qpi.invocator()] = sub(bal, input.amount);
+        balances.cleanupIfNeeded();
     } _
 
-    PUBLIC_PROCEDURE(UpdatePrice) {
-        if (input.price == 0) abort();
+    PUBLIC_PROCEDURE(UpdatePrice)
+    {
+        // price must be nonzero
+        if (input.price == 0) qpi.abort();
         state.latestPrice = input.price;
     } _
 
-    PUBLIC_PROCEDURE(OpenPos) {
-        id user = invocator();
+    PUBLIC_PROCEDURE(OpenPos)
+    {
+        id user = qpi.invocator();
         PosRec pr = positions.get(user);
-        if (pr.isOpen) abort();
+        // no double‐open
+        if (pr.isOpen) qpi.abort();
+        // lock collateral
         uint64 bal = balances.get(user);
-        if (bal < input.margin) abort();
-        balances.set(user, bal - input.margin);
-        PosRec np { state.latestPrice,
-                    mul(input.margin, input.leverage),
-                    input.leverage,
-                    input.isLong,
-                    1 };
-        positions.set(user, np);
+        if (bal < input.margin) qpi.abort();
+        balances[user] = sub(bal, input.margin);
+
+        // record position: size = margin * leverage
+        uint64 posSize = mul(input.margin, input.leverage);
+        PosRec np = { state.latestPrice, posSize, input.leverage, input.isLong, 1 };
+        positions[user] = np;
+        balances.cleanupIfNeeded();
     } _
 
-    PUBLIC_PROCEDURE(ClosePos) {
-        id user = invocator();
+    PUBLIC_PROCEDURE(ClosePos)
+    {
+        id user = qpi.invocator();
         PosRec pr = positions.get(user);
-        if (!pr.isOpen) abort();
-        uint64 price = state.latestPrice;
-        uint64 diff  = pr.isLong
-                     ? price - pr.entryPrice
-                     : pr.entryPrice - price;
+        if (!pr.isOpen) qpi.abort();
+
+        // price difference
+        uint64 priceNow = state.latestPrice;
+        uint64 diff = pr.isLong
+                      ? sub(priceNow, pr.entryPrice)
+                      : sub(pr.entryPrice, priceNow);
+
+        // notionalDiv = size / entryPrice (use safe div)
         uint64 notionalDiv = div(pr.size, pr.entryPrice);
         uint64 pnl = mul(diff, notionalDiv);
-        uint64 ret = div(pr.size, pr.leverage);
-        ret = add(ret, pnl);
+
+        // return = margin + pnl  (margin = size / leverage)
+        uint64 returnMargin = div(pr.size, pr.leverage);
+        uint64 payout = add(returnMargin, pnl);
+// credit back
         uint64 bal = balances.get(user);
-        balances.set(user, add(bal, ret));
+        balances[user] = add(bal, payout);
+
+        // mark closed
         pr.isOpen = 0;
-        positions.set(user, pr);
+        positions[user] = pr;
+        balances.cleanupIfNeeded();
     } _
 
-    // ─── READ-ONLY FUNCTIONS ─────────────────────────────────────────────────
-    PUBLIC_FUNCTION(GetStats) {
+    // ─── Read‐only functions ─────────────────────────────────────────────────────
+
+    PUBLIC_FUNCTION(GetStats)
+    {
         output.numberOfBurnCalls = state.numberOfBurnCalls;
         output.numberOfEchoCalls = state.numberOfEchoCalls;
     } _
 
-    PUBLIC_FUNCTION(GetBalance) {
-        output.balance = balances.get(invocator());
+    PUBLIC_FUNCTION(GetBalance)
+    {
+        output.balance = balances.get(qpi.invocator());
     } _
 
-    // ─── REGISTRATION & INITIALIZATION ─────────────────────────────────────
-    REGISTER_USER_FUNCTIONS_AND_PROCEDURES {
-        REGISTER_USER_PROCEDURE(Echo,        1);
-        REGISTER_USER_PROCEDURE(Burn,        2);
-        REGISTER_USER_PROCEDURE(Deposit,     3);
-        REGISTER_USER_PROCEDURE(Withdraw,    4);
-        REGISTER_USER_PROCEDURE(UpdatePrice, 5);
-        REGISTER_USER_PROCEDURE(OpenPos,     6);
-        REGISTER_USER_PROCEDURE(ClosePos,    7);
-REGISTER_USER_FUNCTION(GetStats,     1);
+    // ─── Registration ───────────────────────────────────────────────────────────
+
+    REGISTER_USER_FUNCTIONS_AND_PROCEDURES
+    {
+        REGISTER_USER_PROCEDURE(Echo,         1);
+        REGISTER_USER_PROCEDURE(Burn,         2);
+        REGISTER_USER_PROCEDURE(Deposit,      3);
+        REGISTER_USER_PROCEDURE(Withdraw,     4);
+        REGISTER_USER_PROCEDURE(UpdatePrice,  5);
+        REGISTER_USER_PROCEDURE(OpenPos,      6);
+        REGISTER_USER_PROCEDURE(ClosePos,     7);
+
+        REGISTER_USER_FUNCTION(GetStats,     1);
         REGISTER_USER_FUNCTION(GetBalance,   2);
     } _
 
-    INITIALIZE {
-        state.numberOfEchoCalls = 0;
-        state.numberOfBurnCalls = 0;
-        state.latestPrice       = 0;
+    // ─── Initialization ─────────────────────────────────────────────────────────
+
+    INITIALIZE
+    {
+        state.numberOfEchoCalls  = 0;
+        state.numberOfBurnCalls  = 0;
+        state.latestPrice        = 0;
+        // HashMaps start empty
     } _
 };
