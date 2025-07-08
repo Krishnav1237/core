@@ -1,36 +1,54 @@
-using namespace QPI;  // Qubic Programming Interface
+#include "qpi.h"
 
-struct HM25 : public ContractBase {
-    // ─── I/O Structs ────────────────────────────────────────────────────────
-    struct Echo_input    {};
-    struct Echo_output   {};
+using namespace QPI;
 
-    struct Burn_input    {};
-    struct Burn_output   {};
+struct HM25 : ContractBase {
+    struct State {
+        uint64 numberOfEchoCalls;
+        uint64 numberOfBurnCalls;
+        uint64 latestPrice;
 
-    struct GetStats_input{};
+        HashMap<id, uint64, 10000> balances;
+
+        struct PosRec {
+            uint64 entryPrice;
+            uint64 size;
+            uint64 leverage;
+            bit isLong;
+            bit isOpen;
+        };
+        HashMap<id, PosRec, 10000> positions;
+    };
+
+    struct Echo_input {};
+    struct Echo_output {};
+
+    struct Burn_input {};
+    struct Burn_output {};
+
+    struct Deposit_input { uint64 amount; };
+    struct Deposit_output {};
+
+    struct Withdraw_input { uint64 amount; };
+    struct Withdraw_output {};
+
+    struct UpdatePrice_input { uint64 price; };
+    struct UpdatePrice_output {};
+
+    struct OpenPos_input { bit isLong; uint64 margin; uint64 leverage; };
+    struct OpenPos_output {};
+
+    struct ClosePos_input {};
+    struct ClosePos_output { uint64 pnl; uint64 returnAmount; };
+
+    struct GetStats_input {};
     struct GetStats_output {
         uint64 numberOfEchoCalls;
         uint64 numberOfBurnCalls;
     };
 
-    struct Deposit_input  { uint64 amount; };
-    struct Deposit_output {};
-
-    struct Withdraw_input { uint64 amount; };
-    struct Withdraw_output{};
-
-    struct UpdatePrice_input { uint64 price; };
-    struct UpdatePrice_output{};
-
-    struct GetBalance_input  {};
+    struct GetBalance_input {};
     struct GetBalance_output { uint64 balance; };
-
-    struct OpenPos_input  { bit isLong; uint64 margin; uint64 leverage; };
-    struct OpenPos_output {};
-
-    struct ClosePos_input {};
-    struct ClosePos_output{ uint64 pnl; uint64 returnAmount; };
 
     struct GetPosition_input {};
     struct GetPosition_output {
@@ -41,22 +59,6 @@ struct HM25 : public ContractBase {
         bit isOpen;
     };
 
-    // ─── STATE ──────────────────────────────────────────────────────────────
-    uint64 numberOfEchoCalls;
-    uint64 numberOfBurnCalls;
-    uint64 latestPrice;
-    HashMap<id, uint64, 10000> balances;
-
-    struct PosRec {
-        uint64 entryPrice;
-        uint64 size;
-        uint64 leverage;
-        bit isLong;
-        bit isOpen;
-    };
-    HashMap<id, PosRec, 10000> positions;
-
-    // ─── PROCEDURES ─────────────────────────────────────────────────────────
     PUBLIC_PROCEDURE(Echo) {
         state.numberOfEchoCalls++;
         uint64 reward = qpi.invocationReward();
@@ -76,200 +78,97 @@ struct HM25 : public ContractBase {
     PUBLIC_PROCEDURE(Deposit) {
         id user = qpi.invocator();
         uint64 reward = qpi.invocationReward();
-        if (reward == 0) {
-            // No deposit amount provided
-            return;
-        }
+        if (reward == 0) return;
 
-        uint64 currentBalance = 0;
-        if (state.balances.contains(user)) {
-            currentBalance = state.balances.get(user);
-        }
-
-        uint64 newBalance = currentBalance + reward;
-        state.balances.set(user, newBalance);
+        uint64 current = state.balances.contains(user) ? state.balances.get(user) : 0;
+        state.balances.set(user, current + reward);
     } _
 
     PUBLIC_PROCEDURE(Withdraw) {
         id user = qpi.invocator();
+        if (!state.balances.contains(user)) return;
 
-        if (!state.balances.contains(user)) {
-            // No balance for user
-            return;
-        }
+        uint64 current = state.balances.get(user);
+        if (current < input.amount) return;
 
-        uint64 currentBalance = state.balances.get(user);
-        if (currentBalance < input.amount) {
-            // Insufficient balance
-            return;
-        }
-
-        uint64 newBalance = currentBalance - input.amount;
-        state.balances.set(user, newBalance);
+        state.balances.set(user, current - input.amount);
         qpi.transfer(user, input.amount);
     } _
 
     PUBLIC_PROCEDURE(UpdatePrice) {
-        if (input.price == 0) {
-            // Invalid price
-            return;
-        }
+        if (input.price == 0) return;
         state.latestPrice = input.price;
     } _
 
     PUBLIC_PROCEDURE(OpenPos) {
         id user = qpi.invocator();
+        if (state.positions.contains(user) && state.positions.get(user).isOpen) return;
 
-        // Check if user already has an open position
-        if (state.positions.contains(user)) {
-            PosRec existingPos = state.positions.get(user);
-            if (existingPos.isOpen) {
-                // Position already open
-                return;
-            }
-        }
+        uint64 balance = state.balances.contains(user) ? state.balances.get(user) : 0;
+        if (balance < input.margin || input.leverage == 0 || state.latestPrice == 0) return;
 
-        // Check if user has sufficient balance
-        uint64 userBalance = 0;
-        if (state.balances.contains(user)) {
-            userBalance = state.balances.get(user);
-        }
+        if (input.margin > UINT64_MAX / input.leverage) return;
 
-        if (userBalance < input.margin) {
-            // Insufficient margin
-            return;
-        }
-
-        // Check for valid leverage (should be > 0)
-        if (input.leverage == 0) {
-            // Invalid leverage
-            return;
-        }
-
-        // Check if price is available
-        if (state.latestPrice == 0) {
-            // No price available
-            return;
-        }
-
-        // Deduct margin from balance
-        uint64 newBalance = userBalance - input.margin;
-        state.balances.set(user, newBalance);
-
-        // Create new position
-        PosRec newPos;
-        newPos.entryPrice = state.latestPrice;
-        newPos.size = input.margin * input.leverage;
-        newPos.leverage = input.leverage;
-        newPos.isLong = input.isLong;
-        newPos.isOpen = 1;
-
-        state.positions.set(user, newPos);
+        state.balances.set(user, balance - input.margin);
+        State::PosRec pos{state.latestPrice, input.margin * input.leverage, input.leverage, input.isLong, 1};
+        state.positions.set(user, pos);
     } _
 
     PUBLIC_PROCEDURE(ClosePos) {
         id user = qpi.invocator();
+        if (!state.positions.contains(user)) return;
 
-        if (!state.positions.contains(user)) {
-            // No position found
-            return;
-        }
+        State::PosRec pos = state.positions.get(user);
+        if (!pos.isOpen || state.latestPrice == 0) return;
 
-        PosRec pos = state.positions.get(user);
-        if (!pos.isOpen) {
-            // Position not open
-            return;
-        }
-
-        if (state.latestPrice == 0) {
-            // No current price available
-            return;
-        }
-
-        // Calculate P&L
-        uint64 priceDiff = 0;
         sint64 pnl = 0;
+        uint64 priceDiff = (pos.isLong ? (state.latestPrice >= pos.entryPrice ? state.latestPrice - pos.entryPrice : pos.entryPrice - state.latestPrice)
+                                       : (pos.entryPrice >= state.latestPrice ? pos.entryPrice - state.latestPrice : state.latestPrice - pos.entryPrice));
 
-        if (pos.isLong) {
-            if (state.latestPrice > pos.entryPrice) {
-                priceDiff = state.latestPrice - pos.entryPrice;
-                pnl = (sint64)((priceDiff * pos.size) / pos.entryPrice);
-            } else {
-                priceDiff = pos.entryPrice - state.latestPrice;
-                pnl = -(sint64)((priceDiff * pos.size) / pos.entryPrice);
-            }
-        } else {
-            if (pos.entryPrice > state.latestPrice) {
-                priceDiff = pos.entryPrice - state.latestPrice;
-                pnl = (sint64)((priceDiff * pos.size) / pos.entryPrice);
-            } else {
-                priceDiff = state.latestPrice - pos.entryPrice;
-                pnl = -(sint64)((priceDiff * pos.size) / pos.entryPrice);
-            }
-        }
+        sint64 signedCalc = (sint64)(priceDiff * pos.size / pos.entryPrice);
+        pnl = pos.isLong ? (state.latestPrice >= pos.entryPrice ? signedCalc : -signedCalc)
+                         : (pos.entryPrice >= state.latestPrice ? signedCalc : -signedCalc);
 
-        // Calculate return amount (margin + P&L)
         uint64 margin = pos.size / pos.leverage;
-        uint64 returnAmount = margin;
+        uint64 retAmt = margin;
+        if (pnl > 0) retAmt += (uint64)pnl;
+        else if ((uint64)(-pnl) < margin) retAmt -= (uint64)(-pnl);
+        else retAmt = 0;
 
-        if (pnl > 0) {
-            returnAmount += (uint64)pnl;
-        } else if (pnl < 0 && (uint64)(-pnl) < margin) {
-            returnAmount -= (uint64)(-pnl);
-        } else if (pnl < 0) {
-            returnAmount = 0; // Total loss
-        }
+        uint64 current = state.balances.contains(user) ? state.balances.get(user) : 0;
+        state.balances.set(user, current + retAmt);
 
-        // Update user balance
-        uint64 currentBalance = 0;
-        if (state.balances.contains(user)) {
-            currentBalance = state.balances.get(user);
-        }
-        state.balances.set(user, currentBalance + returnAmount);
-
-        // Close position
         pos.isOpen = 0;
         state.positions.set(user, pos);
 
-        // Set output values
-        output.pnl = (pnl >= 0) ? (uint64)pnl : 0;
-        output.returnAmount = returnAmount;
+        output.pnl = (pnl > 0 ? (uint64)pnl : 0);
+        output.returnAmount = retAmt;
     } _
 
-    // ─── READ-ONLY FUNCTIONS ─────────────────────────────────────────────────
     PUBLIC_FUNCTION(GetStats) {
-        output.numberOfBurnCalls = state.numberOfBurnCalls;
         output.numberOfEchoCalls = state.numberOfEchoCalls;
+        output.numberOfBurnCalls = state.numberOfBurnCalls;
     } _
 
     PUBLIC_FUNCTION(GetBalance) {
         id user = qpi.invocator();
-        if (state.balances.contains(user)) {
-            output.balance = state.balances.get(user);
-        } else {
-            output.balance = 0;
-        }
+        output.balance = (state.balances.contains(user) ? state.balances.get(user) : 0);
     } _
 
     PUBLIC_FUNCTION(GetPosition) {
         id user = qpi.invocator();
         if (state.positions.contains(user)) {
-            PosRec pos = state.positions.get(user);
-            output.entryPrice = pos.entryPrice;
-            output.size = pos.size;
-            output.leverage = pos.leverage;
-            output.isLong = pos.isLong;
-            output.isOpen = pos.isOpen;
+            State::PosRec p = state.positions.get(user);
+            output.entryPrice = p.entryPrice;
+            output.size = p.size;
+            output.leverage = p.leverage;
+            output.isLong = p.isLong;
+            output.isOpen = p.isOpen;
         } else {
-            output.entryPrice = 0;
-            output.size = 0;
-            output.leverage = 0;
-            output.isLong = 0;
-            output.isOpen = 0;
+            output = {0,0,0,0,0};
         }
     } _
 
-    // ─── REGISTRATION & INITIALIZATION ─────────────────────────────────────
     REGISTER_USER_FUNCTIONS_AND_PROCEDURES {
         REGISTER_USER_PROCEDURE(Echo,        1);
         REGISTER_USER_PROCEDURE(Burn,        2);
